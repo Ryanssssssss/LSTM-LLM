@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# 环境
+.env
+venv/
+env/
+*.conda
+
+# 模型和大文件
+*.pth
+*.pt
+*.bin
+*.h5
+*.ckpt
+
+# GPT2 模型文件（太大）
+gpt2_model/
+
+# 日志
+logs/
+*.log
+
+# 数据
+embeddings/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# 其他
+results/

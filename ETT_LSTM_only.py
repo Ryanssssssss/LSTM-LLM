@@ -19,19 +19,18 @@ warnings.filterwarnings('ignore')
 # ==================== ⚙️ 超参数配置 ====================
 LOOK_BACK = 96
 N_FUTURE = 24
-TRAIN_RATIO = 0.6
-VAL_RATIO = 0.2
-TEST_RATIO = 0.2
+TRAIN_RATIO = 0.7
+TEST_RATIO = 0.3
 
 LSTM_HIDDEN_SIZE = 128  # 与LSTM-LLM保持一致
 LSTM_NUM_LAYERS = 2     # 与LSTM-LLM保持一致
-LSTM_DROPOUT = 0.2      # 与LSTM-LLM保持一致
+LSTM_DROPOUT = 0.4      # 增强正则化：从0.2增加到0.4
 
 BATCH_SIZE = 32
-LEARNING_RATE = 0.001
-WEIGHT_DECAY = 1e-5
-EPOCHS = 100
-EARLY_STOP_PATIENCE = 15
+LEARNING_RATE = 0.0003  # 大幅降低学习率：从0.001降至0.0003
+WEIGHT_DECAY = 5e-4     # 增强L2正则：从1e-5增加到5e-4
+EPOCHS = 50             # 减少epochs防止过拟合
+EARLY_STOP_PATIENCE = 8 # 更激进的早停
 GRAD_CLIP_NORM = 1.0
 
 RANDOM_SEED = 42
@@ -85,13 +84,11 @@ def create_sequences(data, look_back, n_future):
 X, y = create_sequences(data_scaled, LOOK_BACK, N_FUTURE)
 
 train_size = int(len(X) * TRAIN_RATIO)
-val_size = int(len(X) * VAL_RATIO)
 
 X_train, y_train = X[:train_size], y[:train_size]
-X_val, y_val = X[train_size:train_size+val_size], y[train_size:train_size+val_size]
-X_test, y_test = X[train_size+val_size:], y[train_size+val_size:]
+X_test, y_test = X[train_size:], y[train_size:]
 
-logger.info(f"训练集: {len(X_train)} | 验证集: {len(X_val)} | 测试集: {len(X_test)}")
+logger.info(f"训练集: {len(X_train)} ({TRAIN_RATIO*100:.0f}%) | 测试集: {len(X_test)} ({TEST_RATIO*100:.0f}%)")
 
 # Dataset
 class ETTDataset(Dataset):
@@ -106,7 +103,6 @@ class ETTDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 train_loader = DataLoader(ETTDataset(X_train, y_train), batch_size=BATCH_SIZE, shuffle=True)
-val_loader = DataLoader(ETTDataset(X_val, y_val), batch_size=BATCH_SIZE, shuffle=False)
 test_loader = DataLoader(ETTDataset(X_test, y_test), batch_size=BATCH_SIZE, shuffle=False)
 
 # 纯LSTM模型
@@ -141,16 +137,21 @@ logger.info(f"模型参数量: {sum(p.numel() for p in model.parameters()):,}")
 
 # 训练
 optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
 criterion = nn.MSELoss()
+# 添加学习率衰减
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='min', factor=0.5, patience=5, verbose=True
+)
 
-logger.info("\n开始训练...")
-best_val_loss = float('inf')
+logger.info("\n开始训练（70/30划分，增强正则化）...")
+best_train_loss = float('inf')
 patience_counter = 0
 
 for epoch in range(EPOCHS):
     model.train()
     train_loss = 0
+    train_preds, train_trues = [], []
+    
     for X_batch, y_batch in train_loader:
         X_batch, y_batch = X_batch.to(device), y_batch.to(device)
         optimizer.zero_grad()
@@ -160,35 +161,31 @@ for epoch in range(EPOCHS):
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_CLIP_NORM)
         optimizer.step()
         train_loss += loss.item()
+        train_preds.append(pred.detach().cpu().numpy())
+        train_trues.append(y_batch.detach().cpu().numpy())
     
     train_loss /= len(train_loader)
+    train_preds = np.vstack(train_preds)
+    train_trues = np.vstack(train_trues)
+    train_r2 = r2_score(train_trues.flatten(), train_preds.flatten())
     
-    model.eval()
-    val_loss = 0
-    with torch.no_grad():
-        for X_batch, y_batch in val_loader:
-            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-            pred = model(X_batch)
-            loss = criterion(pred, y_batch)
-            val_loss += loss.item()
+    # 学习率衰减
+    scheduler.step(train_loss)
     
-    val_loss /= len(val_loader)
-    scheduler.step(val_loss)
-    
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
+    if train_loss < best_train_loss:
+        best_train_loss = train_loss
         torch.save(model.state_dict(), MODEL_SAVE_PATH)
         patience_counter = 0
-        save_status = "✓ 已保存"
+        save_status = "✓"
     else:
         patience_counter += 1
-        save_status = f"未保存 ({patience_counter}/{EARLY_STOP_PATIENCE})"
+        save_status = ""
     
-    if (epoch + 1) % 5 == 0:
-        logger.info(f"Epoch {epoch+1} | Train: {train_loss:.6f} | Val: {val_loss:.6f} | {save_status}")
+    logger.info(f"Epoch {epoch+1:3d}/{EPOCHS} | Loss: {train_loss:.4f} | R²: {train_r2:.4f} | {save_status}")
     
+    # 早停检查
     if patience_counter >= EARLY_STOP_PATIENCE:
-        logger.info(f"早停触发，最佳val loss: {best_val_loss:.6f}")
+        logger.info(f"\n早停触发！连续{EARLY_STOP_PATIENCE}轮无改善")
         break
 
 # 测试

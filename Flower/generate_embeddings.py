@@ -119,15 +119,47 @@ class PromptGenerator:
             soil_trend = np.polyfit(np.arange(len(soil_temp)), soil_temp, 1)[0]
             air_trend = np.polyfit(np.arange(len(air_temp)), air_temp, 1)[0]
             
+            # 简化Prompt：只保留关键语义信息
+            # 1. 判断趋势强度（语义化）
+            if abs(soil_trend) > 0.05:
+                soil_trend_desc = f"{'快速升温' if soil_trend > 0 else '快速降温'}"
+            elif abs(soil_trend) > 0.01:
+                soil_trend_desc = f"{'缓慢升温' if soil_trend > 0 else '缓慢降温'}"
+            else:
+                soil_trend_desc = "保持稳定"
+            
+            if abs(air_trend) > 0.05:
+                air_trend_desc = f"{'快速升温' if air_trend > 0 else '快速降温'}"
+            elif abs(air_trend) > 0.01:
+                air_trend_desc = f"{'缓慢升温' if air_trend > 0 else '缓慢降温'}"
+            else:
+                air_trend_desc = "保持稳定"
+            
+            # 2. 湿度状态判断
+            if humidity.mean() > 90:
+                humidity_desc = "高湿饱和"
+            elif humidity.mean() > 70:
+                humidity_desc = "中等湿度"
+            else:
+                humidity_desc = "相对干燥"
+            
+            # 3. 温差关系（物理规律）
+            temp_diff = air_temp.mean() - soil_temp.mean()
+            if temp_diff > 1.0:
+                relation_desc = "空气明显热于土壤，热量向下传递"
+            elif temp_diff < -1.0:
+                relation_desc = "土壤蓄热，向空气释放热量"
+            else:
+                relation_desc = "气土温度接近平衡"
+            
+            # 4. 构建精简Prompt（只用语义描述，不堆数值）
             prompt = (
-                f"<|greenhouse_prediction|>地理位置：广东省云浮市（北纬22°22′-23°19′，东经111°03′-112°31′）。"
-                f"历史数据：过去{self.look_back}个时间步的环境监测数据。"
-                f"土壤温度范围：{soil_temp.min():.1f}℃-{soil_temp.max():.1f}℃，平均{soil_temp.mean():.1f}℃，"
-                f"变化趋势：{'升温' if soil_trend > 0 else '降温'}{abs(soil_trend):.2f}℃/步。"
-                f"空气温度范围：{air_temp.min():.1f}℃-{air_temp.max():.1f}℃，平均{air_temp.mean():.1f}℃，"
-                f"变化趋势：{'升温' if air_trend > 0 else '降温'}{abs(air_trend):.2f}℃/步。"
-                f"空气湿度范围：{humidity.min():.1f}%-{humidity.max():.1f}%，平均{humidity.mean():.1f}%。"
-                f"任务：基于以上信息，预测未来{n_future}步（120分钟）的土壤温度变化。<|endoftext|>"
+                f"<|greenhouse_prediction|>广东云浮亚热带温室环境分析。"
+                f"土壤温度趋势：{soil_trend_desc}（当前{soil_temp[-1]:.1f}℃）；"
+                f"空气温度趋势：{air_trend_desc}（当前{air_temp[-1]:.1f}℃）；"
+                f"空气湿度状态：{humidity_desc}（{humidity.mean():.0f}%）；"
+                f"热力学特征：{relation_desc}。"
+                f"预测未来2小时土壤温度变化。<|endoftext|>"
             )
             prompts.append(prompt)
         

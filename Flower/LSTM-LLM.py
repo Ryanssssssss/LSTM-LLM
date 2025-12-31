@@ -19,8 +19,42 @@ import time
 from datetime import datetime
 warnings.filterwarnings('ignore')
 
+# ==================== ⚙️ 超参数配置（可调整） ====================
+# 时序窗口设置
+LOOK_BACK = 48          # 历史时间步数（输入）- 当前: 10步 × 20分钟/步 = 200分钟（3.3小时）
+N_FUTURE = 36            # 预测未来步数（输出）- 当前: 6步 × 20分钟/步 = 120分钟（2小时）
+
+# 数据划分比例
+TRAIN_RATIO = 0.7       # 训练集比例
+VAL_RATIO = 0.1         # 验证集比例
+TEST_RATIO = 0.2        # 测试集比例
+
+# LSTM模型结构
+LSTM_HIDDEN_SIZE = 128  # LSTM隐藏层维度
+LSTM_NUM_LAYERS = 2     # LSTM层数
+LSTM_DROPOUT = 0.2      # LSTM Dropout率
+
+# 训练超参数
+BATCH_SIZE = 32         # 批次大小
+LEARNING_RATE = 0.001   # 初始学习率
+WEIGHT_DECAY = 5e-5     # 权重衰减（L2正则化）
+EPOCHS = 150            # 最大训练轮数
+EARLY_STOP_PATIENCE = 30  # 早停耐心值（验证集loss不降的轮数）
+GRAD_CLIP_NORM = 1.0    # 梯度裁剪阈值
+
+# LLM配置
+GPT2_MODEL_NAME = 'gpt2'  # GPT-2模型名称（可选：gpt2, gpt2-medium, distilgpt2）
+GPT2_EMBEDDING_DIM = 768  # GPT-2输出维度（gpt2: 768, gpt2-medium: 1024）
+
+# 其他配置
+RANDOM_SEED = 42        # 随机种子
+DATA_FILE = "data/数据列表（20240317~20240505）.xlsx"  # 数据文件路径
+MODEL_SAVE_PATH = "checkpoints/best_lstm_llm_model.pth"  # 模型保存路径
+# ==================== ⚙️ 配置结束 ====================
+
 # 配置日志系统
 os.makedirs('logs', exist_ok=True)
+os.makedirs('checkpoints', exist_ok=True)
 log_filename = f"logs/training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 logging.basicConfig(
     level=logging.INFO,
@@ -33,7 +67,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 设置随机种子保证可复现性
-def set_seed(seed=42):
+def set_seed(seed=RANDOM_SEED):
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -41,12 +75,20 @@ def set_seed(seed=42):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-set_seed(42)
+set_seed(RANDOM_SEED)
 
 # 设备配置
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 logger.info(f"使用设备: {device}")
 logger.info(f"日志文件: {log_filename}")
+logger.info("\n" + "="*60)
+logger.info("⚙️  超参数配置")
+logger.info("="*60)
+logger.info(f"历史窗口: {LOOK_BACK}步 ({LOOK_BACK*20}分钟) | 预测窗口: {N_FUTURE}步 ({N_FUTURE*20}分钟)")
+logger.info(f"数据划分: 训练{TRAIN_RATIO*100}% | 验证{VAL_RATIO*100}% | 测试{TEST_RATIO*100}%")
+logger.info(f"LSTM结构: {LSTM_NUM_LAYERS}层 × {LSTM_HIDDEN_SIZE}维 (Dropout={LSTM_DROPOUT})")
+logger.info(f"训练参数: Batch={BATCH_SIZE} | LR={LEARNING_RATE} | Epochs={EPOCHS} | 早停={EARLY_STOP_PATIENCE}")
+logger.info(f"LLM模型: {GPT2_MODEL_NAME} (Embedding={GPT2_EMBEDDING_DIM}维)")
 
 # ==================== 1. 数据加载与预处理 ====================
 logger.info("="*60)
@@ -54,7 +96,7 @@ logger.info("1. 数据加载与预处理")
 logger.info("="*60)
 
 # 读取数据
-df = pd.read_excel("data/数据列表（20240317~20240505）.xlsx")
+df = pd.read_excel(DATA_FILE)
 df = df.iloc[::-1].reset_index(drop=True)  # 反转时间序列
 df = df.loc[:,['土壤温度','空气温度','空气湿度']]
 
@@ -116,8 +158,8 @@ def series_to_supervised(data, n_in=1, n_out=1, dropnan=True):
     return agg
 
 # 参数设置
-look_back = 10  # 历史时间步
-n_future = 6    # 预测未来6步
+look_back = LOOK_BACK
+n_future = N_FUTURE
 
 # 构建监督学习数据
 supervised_data = series_to_supervised(scaled_data, n_in=look_back, n_out=n_future)
@@ -141,8 +183,8 @@ logger.info("3. 数据集划分")
 logger.info("="*60)
 
 # 训练集:验证集:测试集 = 7:1:2
-train_size = int(len(X) * 0.7)
-val_size = int(len(X) * 0.1)
+train_size = int(len(X) * TRAIN_RATIO)
+val_size = int(len(X) * VAL_RATIO)
 
 X_train = X[:train_size]
 y_train = y[:train_size]
@@ -196,15 +238,47 @@ class PromptGenerator:
             soil_trend = np.polyfit(np.arange(len(soil_temp)), soil_temp, 1)[0]
             air_trend = np.polyfit(np.arange(len(air_temp)), air_temp, 1)[0]
             
-            # 构建prompt
+            # 简化Prompt：只保留关键语义信息
+            # 1. 判断趋势强度（语义化）
+            if abs(soil_trend) > 0.05:
+                soil_trend_desc = f"{'快速升温' if soil_trend > 0 else '快速降温'}"
+            elif abs(soil_trend) > 0.01:
+                soil_trend_desc = f"{'缓慢升温' if soil_trend > 0 else '缓慢降温'}"
+            else:
+                soil_trend_desc = "保持稳定"
+            
+            if abs(air_trend) > 0.05:
+                air_trend_desc = f"{'快速升温' if air_trend > 0 else '快速降温'}"
+            elif abs(air_trend) > 0.01:
+                air_trend_desc = f"{'缓慢升温' if air_trend > 0 else '缓慢降温'}"
+            else:
+                air_trend_desc = "保持稳定"
+            
+            # 2. 湿度状态判断
+            if humidity.mean() > 90:
+                humidity_desc = "高湿饱和"
+            elif humidity.mean() > 70:
+                humidity_desc = "中等湿度"
+            else:
+                humidity_desc = "相对干燥"
+            
+            # 3. 温差关系（物理规律）
+            temp_diff = air_temp.mean() - soil_temp.mean()
+            if temp_diff > 1.0:
+                relation_desc = "空气明显热于土壤，热量向下传递"
+            elif temp_diff < -1.0:
+                relation_desc = "土壤蓄热，向空气释放热量"
+            else:
+                relation_desc = "气土温度接近平衡"
+            
+            # 4. 构建精简Prompt（只用语义描述，不堆数值）
             prompt = (
-                f"<|greenhouse_prediction|>地理位置：广东省云浮市（北纬22°22′-23°19′，东经111°03′-112°31′）。"
-                f"历史10步观测：土壤温度从{soil_temp[0]:.2f}℃变化到{soil_temp[-1]:.2f}℃，"
-                f"趋势为{soil_trend:.4f}℃/步；"
-                f"空气温度从{air_temp[0]:.2f}℃变化到{air_temp[-1]:.2f}℃，"
-                f"趋势为{air_trend:.4f}℃/步；"
-                f"空气湿度均值{humidity.mean():.2f}%。"
-                f"任务：基于亚热带温室气候特征预测未来6步土壤温度。"
+                f"<|greenhouse_prediction|>广东云浮亚热带温室环境分析。"
+                f"土壤温度趋势：{soil_trend_desc}（当前{soil_temp[-1]:.1f}℃）；"
+                f"空气温度趋势：{air_trend_desc}（当前{air_temp[-1]:.1f}℃）；"
+                f"空气湿度状态：{humidity_desc}（{humidity.mean():.0f}%）；"
+                f"热力学特征：{relation_desc}。"
+                f"预测未来2小时土壤温度变化。<|endoftext|>"
             )
             prompts.append(prompt)
         
@@ -362,10 +436,10 @@ class LSTMLLMOffline(nn.Module):
 # 初始化模型（使用离线embeddings版本）
 model = LSTMLLMOffline(
     lstm_input_size=3,  # 3个特征
-    lstm_hidden_size=128,
-    llm_hidden_size=768,  # GPT-2隐藏层维度
+    lstm_hidden_size=LSTM_HIDDEN_SIZE,
+    llm_hidden_size=GPT2_EMBEDDING_DIM,
     output_steps=n_future,
-    dropout=0.2
+    dropout=LSTM_DROPOUT
 ).to(device)
 
 total_params = sum(p.numel() for p in model.parameters())
@@ -377,12 +451,6 @@ logger.info(f"可训练参数量: {trainable_params:,}")
 logger.info("\n" + "="*60)
 logger.info("7. 训练配置")
 logger.info("="*60)
-
-# 超参数
-BATCH_SIZE = 32
-EPOCHS = 100
-LEARNING_RATE = 0.001
-WEIGHT_DECAY = 1e-5
 
 # 数据加载器（加载预生成的embeddings）
 logger.info("创建数据加载器，使用预生成的embeddings...")
@@ -415,7 +483,7 @@ logger.info("="*60)
 
 # 创建checkpoints目录
 os.makedirs('checkpoints', exist_ok=True)
-model_save_path = 'checkpoints/best_lstm_llm_model.pth'
+model_save_path = MODEL_SAVE_PATH
 
 train_losses = []
 val_losses = []
@@ -445,7 +513,7 @@ for epoch in range(EPOCHS):
         # 反向传播
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_CLIP_NORM)
         optimizer.step()
         
         train_loss += loss.item()
@@ -485,7 +553,7 @@ for epoch in range(EPOCHS):
         save_status = "✓ 已保存"
         patience_counter = 0
     else:
-        save_status = f"未保存 (patience: {patience_counter + 1}/{early_stop_patience})"
+        save_status = f"未保存 (patience: {patience_counter + 1}/{EARLY_STOP_PATIENCE})"
         patience_counter += 1
     
     # 每轮都打印详细的训练进度
@@ -497,7 +565,7 @@ for epoch in range(EPOCHS):
         f"{save_status}"
     )
     
-    if patience_counter >= early_stop_patience:
+    if patience_counter >= EARLY_STOP_PATIENCE:
         logger.info(f"Early stopping at epoch {epoch+1}")
         break
 

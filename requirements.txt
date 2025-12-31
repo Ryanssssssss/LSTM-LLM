@@ -16,5 +16,8 @@ scikit-learn>=1.3.0
 # 可视化
 matplotlib>=3.7.0
 
+# 数据存储
+h5py>=3.8.0
+
 # 其他工具
 tqdm>=4.65.0

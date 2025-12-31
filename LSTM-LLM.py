@@ -15,6 +15,7 @@ from transformers import GPT2Model, GPT2Tokenizer
 import warnings
 import logging
 import os
+import time
 from datetime import datetime
 warnings.filterwarnings('ignore')
 
@@ -412,16 +413,25 @@ logger.info("\n" + "="*60)
 logger.info("8. 开始训练")
 logger.info("="*60)
 
+# 创建checkpoints目录
+os.makedirs('checkpoints', exist_ok=True)
+model_save_path = 'checkpoints/best_lstm_llm_model.pth'
+
 train_losses = []
 val_losses = []
 best_val_loss = float('inf')
 patience_counter = 0
 early_stop_patience = 20
 
+import time
+
 for epoch in range(EPOCHS):
+    epoch_start_time = time.time()
+    
     # 训练阶段
     model.train()
     train_loss = 0.0
+    train_start_time = time.time()
     
     for batch_x, batch_y, batch_embeddings in train_loader:
         batch_x = batch_x.to(device)
@@ -442,10 +452,12 @@ for epoch in range(EPOCHS):
     
     train_loss /= len(train_loader)
     train_losses.append(train_loss)
+    train_time = time.time() - train_start_time
     
     # 验证阶段
     model.eval()
     val_loss = 0.0
+    val_start_time = time.time()
     
     with torch.no_grad():
         for batch_x, batch_y, batch_embeddings in val_loader:
@@ -460,6 +472,8 @@ for epoch in range(EPOCHS):
     
     val_loss /= len(val_loader)
     val_losses.append(val_loss)
+    val_time = time.time() - val_start_time
+    epoch_time = time.time() - epoch_start_time
     
     # 学习率调整
     scheduler.step(val_loss)
@@ -467,15 +481,21 @@ for epoch in range(EPOCHS):
     # Early stopping
     if val_loss < best_val_loss:
         best_val_loss = val_loss
-        torch.save(model.state_dict(), 'best_lstm_llm_model.pth')
+        torch.save(model.state_dict(), model_save_path)
+        save_status = "✓ 已保存"
         patience_counter = 0
     else:
+        save_status = f"未保存 (patience: {patience_counter + 1}/{early_stop_patience})"
         patience_counter += 1
     
-    if (epoch + 1) % 10 == 0:
-        logger.info(f"Epoch [{epoch+1}/{EPOCHS}] "
-              f"Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f} | "
-              f"LR: {optimizer.param_groups[0]['lr']:.6f}")
+    # 每轮都打印详细的训练进度
+    logger.info(
+        f"Epoch [{epoch+1:3d}/{EPOCHS}] "
+        f"Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f} | "
+        f"LR: {optimizer.param_groups[0]['lr']:.6f} | "
+        f"Time: {epoch_time:.2f}s (Train: {train_time:.2f}s, Val: {val_time:.2f}s) | "
+        f"{save_status}"
+    )
     
     if patience_counter >= early_stop_patience:
         logger.info(f"Early stopping at epoch {epoch+1}")
@@ -487,7 +507,8 @@ logger.info("9. 测试集评估")
 logger.info("="*60)
 
 # 加载最佳模型
-model.load_state_dict(torch.load('best_lstm_llm_model.pth'))
+model.load_state_dict(torch.load(model_save_path))
+logger.info(f"✓ 已加载最佳模型: {model_save_path}")
 model.eval()
 
 all_predictions = []
@@ -508,13 +529,25 @@ predictions = np.vstack(all_predictions)
 targets = np.vstack(all_targets)
 
 # 反归一化到原始尺度
-predictions_real = scaler.inverse_transform(
-    np.hstack([predictions, np.zeros((predictions.shape[0], 2))])
-)[:, :n_future]
+# predictions: (N, 6) - 只有土壤温度的6步预测
+# 需要补齐为 (N, 6, 3) 才能正确反归一化每一步
+predictions_real = np.zeros_like(predictions)
+targets_real = np.zeros_like(targets)
 
-targets_real = scaler.inverse_transform(
-    np.hstack([targets, np.zeros((targets.shape[0], 2))])
-)[:, :n_future]
+for step in range(n_future):
+    # 为每一步构造 (N, 3) 的矩阵：[土壤温度, 0, 0]
+    step_pred = np.hstack([
+        predictions[:, step:step+1],
+        np.zeros((predictions.shape[0], 2))
+    ])
+    step_target = np.hstack([
+        targets[:, step:step+1],
+        np.zeros((targets.shape[0], 2))
+    ])
+    
+    # 反归一化后只取第一列（土壤温度）
+    predictions_real[:, step] = scaler.inverse_transform(step_pred)[:, 0]
+    targets_real[:, step] = scaler.inverse_transform(step_target)[:, 0]
 
 # 计算指标
 mse = mean_squared_error(targets_real, predictions_real)
@@ -582,7 +615,7 @@ log_data = {
     'model_info': {
         'total_params': total_params,
         'trainable_params': trainable_params,
-        'model_path': 'best_lstm_llm_model.pth'
+        'model_path': model_save_path
     }
 }
 
@@ -599,7 +632,7 @@ logger.info("="*60)
 logger.info(f"\n【模型信息】")
 logger.info(f"  总参数量: {total_params:,}")
 logger.info(f"  可训练参数量: {trainable_params:,}")
-logger.info(f"  最佳模型: best_lstm_llm_model.pth")
+logger.info(f"  最佳模型: {model_save_path}")
 
 logger.info(f"\n【训练信息】")
 logger.info(f"  训练轮数: {len(train_losses)} epochs")

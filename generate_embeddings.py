@@ -1,5 +1,5 @@
 """
-离线生成Prompt Embeddings
+🌟 离线生成Prompt Embeddings（测试修改）
 参考ProLLM架构，预先计算所有样本的GPT-2 embeddings，避免训练时重复编码
 """
 import numpy as np
@@ -12,12 +12,12 @@ from transformers import GPT2Model, GPT2Tokenizer
 from sklearn.preprocessing import MinMaxScaler
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"使用设备: {device}")
+print(f"🚀 当前使用设备: {device}")
 
 # ==================== 1. 数据加载（与主训练脚本一致） ====================
-print("="*60)
+print("="*80)
 print("1. 数据加载与预处理")
-print("="*60)
+print("="*80)
 
 df = pd.read_excel("data/数据列表（20240317~20240505）.xlsx")
 df = df.iloc[::-1].reset_index(drop=True)
@@ -141,12 +141,12 @@ print("\n" + "="*60)
 print("5. 加载GPT-2模型")
 print("="*60)
 
-tokenizer = GPT2Tokenizer.from_pretrained('gpt2_model')
+tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
 tokenizer.pad_token = tokenizer.eos_token
-gpt2_model = GPT2Model.from_pretrained('gpt2_model').to(device)
+gpt2_model = GPT2Model.from_pretrained('gpt2').to(device)
 gpt2_model.eval()
 
-print("GPT-2模型加载完成")
+print("✓ GPT-2模型加载完成 - 测试版本")
 
 # ==================== 6. 生成并保存Embeddings ====================
 print("\n" + "="*60)
@@ -205,10 +205,10 @@ def generate_embeddings(X_data, split_name, batch_size=32):
     
     print(f"✓ {split_name}集embeddings已保存至 {save_dir}/")
 
-# 生成所有数据集的embeddings
-generate_embeddings(X_train, 'train', batch_size=32)
-generate_embeddings(X_val, 'val', batch_size=32)
-generate_embeddings(X_test, 'test', batch_size=32)
+# 生成所有数据集的embeddings (测试修改：调整batch_size)
+generate_embeddings(X_train, 'train', batch_size=16)
+generate_embeddings(X_val, 'val', batch_size=16)
+generate_embeddings(X_test, 'test', batch_size=16)
 
 # ==================== 7. 验证生成的embeddings ====================
 print("\n" + "="*60)
@@ -233,6 +233,6 @@ verify_embeddings('val', len(X_val))
 verify_embeddings('test', len(X_test))
 
 print("\n" + "="*60)
-print("✓ Embedding生成完成！")
+print("✓ Embedding生成完成！(测试运行)")
 print("="*60)
-print(f"日志文件: {log_filename}")
+# print(f"日志文件: {log_filename}")  # 测试：注释掉未定义的变量

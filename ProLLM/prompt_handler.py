@@ -140,7 +140,7 @@ class PromptHandler:
 
     def _resolve_embedding_dir(self, dataset_name: str, split: str) -> str:
         """根据当前表示类型解析离线 embedding 目录"""
-        base_dir = os.path.join('embeddings', dataset_name)
+        base_dir = os.path.join('embeddings', 'classify', dataset_name)
         if self.representation == 'sequence':
             default_dir = os.path.join(base_dir, split)
             if os.path.isdir(default_dir):
@@ -222,4 +222,71 @@ class PromptHandler:
         stacked = torch.stack(batch_tensors, dim=0)
         if self.representation != 'sequence':
             return stacked  # [B, 1, d_model]
+        return stacked
+    
+    def preload_all_embeddings(self, dataset_name, is_training=True):
+        """
+        预加载所有embeddings到内存，显著加速训练。
+        
+        Args:
+            dataset_name: 数据集名称
+            is_training: True加载训练集，False加载测试集
+        
+        Returns:
+            torch.Tensor: (N, 1, d_model) 或 (N, max_length, d_model)
+        """
+        split = 'train' if is_training else 'test'
+        dir_path = self._resolve_embedding_dir(dataset_name, split)
+        
+        if not os.path.isdir(dir_path):
+            raise FileNotFoundError(
+                f"Embeddings directory not found: {dir_path}. "
+                f"Please run embed_prompt.py to generate per-sample embeddings first."
+            )
+        
+        # 获取所有文件并排序
+        files = sorted([f for f in os.listdir(dir_path) if f.endswith('.h5')],
+                      key=lambda x: int(x.replace('.h5', '')))
+        
+        if not files:
+            raise FileNotFoundError(f"No embedding files found in {dir_path}")
+        
+        print(f"预加载 {split} embeddings: {len(files)} 个样本...")
+        
+        all_embeddings = []
+        for file_name in files:
+            file_path = os.path.join(dir_path, file_name)
+            with h5py.File(file_path, 'r') as hf:
+                if 'embeddings' not in hf:
+                    raise KeyError(f"'embeddings' dataset not found in file: {file_path}")
+                arr = hf['embeddings'][:]
+            
+            tensor = torch.from_numpy(arr)
+            
+            # 处理维度
+            if self.representation == 'sequence':
+                if tensor.dim() != 2:
+                    raise ValueError(
+                        f"Expected token-level embedding of shape [L, d_model], got {tensor.shape}."
+                    )
+                if tensor.shape[0] != self.max_length:
+                    raise ValueError(
+                        f"Embedding length mismatch: got {tensor.shape[0]}, expected {self.max_length}."
+                    )
+            else:  # pooled_last_token
+                if tensor.dim() == 2 and tensor.shape[0] == 1:
+                    tensor = tensor.squeeze(0)
+                if tensor.dim() != 1:
+                    raise ValueError(
+                        f"Expected pooled embedding with shape [d_model], got {tensor.shape}."
+                    )
+                tensor = tensor.unsqueeze(0)  # (1, d_model)
+            
+            all_embeddings.append(tensor)
+        
+        # 堆叠所有embeddings
+        stacked = torch.stack(all_embeddings, dim=0)  # (N, 1, d_model) or (N, L, d_model)
+        
+        print(f"✓ 预加载完成: {stacked.shape}, 内存占用: {stacked.element_size() * stacked.nelement() / 1024 / 1024:.2f} MB")
+        
         return stacked
